@@ -22,6 +22,87 @@ RSpec.describe RailsActiveMcp::ConsoleExecutor do
     end
   end
 
+  describe 'configurable safety checker' do
+    let(:recording_checker_class) do
+      Class.new do
+        attr_reader :received_config
+
+        def initialize(config)
+          @received_config = config
+        end
+
+        def safe?(_code)
+          true
+        end
+
+        def analyze(_code)
+          { safe: true, read_only: true, violations: [], summary: 'recording: safe' }
+        end
+
+        def read_only?(_code)
+          true
+        end
+      end
+    end
+
+    let(:blocking_checker_class) do
+      Class.new do
+        def initialize(config); end
+
+        def safe?(_code)
+          false
+        end
+
+        def analyze(_code)
+          {
+            safe: false,
+            read_only: false,
+            violations: [{ pattern: //, description: 'blocked by custom', severity: :critical }],
+            summary: 'custom: blocked'
+          }
+        end
+
+        def read_only?(_code)
+          false
+        end
+      end
+    end
+
+    it 'instantiates the class assigned to config.safety_checker with the config' do
+      config.safety_checker = recording_checker_class
+      executor = described_class.new(config)
+
+      checker = executor.instance_variable_get(:@safety_checker)
+      expect(checker).to be_a(recording_checker_class)
+      expect(checker.received_config).to eq(config)
+    end
+
+    it 'returns a SafetyError result when the custom checker reports unsafe in safe_mode' do
+      config.safety_checker = blocking_checker_class
+      config.safe_mode = true
+      executor = described_class.new(config)
+
+      result = executor.execute('1 + 1')
+
+      expect(result[:success]).to be false
+      expect(result[:error_class]).to eq('SafetyError')
+      expect(result[:error]).to include('custom: blocked')
+    end
+
+    it 'allows execution when the custom checker reports safe in safe_mode' do
+      config.safety_checker = recording_checker_class
+      config.safe_mode = true
+      executor = described_class.new(config)
+
+      # eval(...) would be blocked by the default SafetyChecker (severity :high);
+      # passing here proves the executor is consulting the custom checker, not the default.
+      result = executor.execute('eval("1 + 1")')
+
+      expect(result[:success]).to be true
+      expect(result[:return_value]).to eq(2)
+    end
+  end
+
   describe '#execute' do
     context 'with safe code' do
       it 'executes simple arithmetic safely' do
@@ -173,6 +254,20 @@ RSpec.describe RailsActiveMcp::ConsoleExecutor do
       expect(result[:method]).to eq('count')
     end
 
+    it 'applies where conditions before count' do
+      filtered = double('Relation', count: 3)
+      model = double('Model')
+      allow(model).to receive(:where).with({ active: true }).and_return(filtered)
+      allow(String).to receive(:constantize).and_return(model)
+
+      result = executor.execute_safe_query(model: 'User', method: 'count', where: { active: true })
+
+      expect(result[:success]).to be true
+      expect(result[:result]).to eq(3)
+      expect(result[:where]).to eq({ active: true })
+      expect(model).to have_received(:where).with({ active: true })
+    end
+
     it 'blocks unsafe query methods' do
       result = executor.execute_safe_query(model: 'User', method: 'delete_all')
 
@@ -189,6 +284,101 @@ RSpec.describe RailsActiveMcp::ConsoleExecutor do
       expect(result[:success]).to be false
       expect(result[:error_class]).to eq('SafetyError')
       expect(result[:error]).to include('not allowed')
+    end
+
+    it 'treats an empty where hash as no filter' do
+      model = double('Model', count: 7)
+      expect(model).not_to receive(:where)
+      allow(String).to receive(:constantize).and_return(model)
+
+      result = executor.execute_safe_query(model: 'User', method: 'count', where: {})
+
+      expect(result[:success]).to be true
+      expect(result[:result]).to eq(7)
+    end
+
+    it 'rejects where queries on disallowed models' do
+      config.allowed_models = ['User']
+
+      result = executor.execute_safe_query(
+        model: 'SecretModel',
+        method: 'count',
+        where: { active: true }
+      )
+
+      expect(result[:success]).to be false
+      expect(result[:error_class]).to eq('SafetyError')
+      expect(result[:where]).to eq({ active: true })
+    end
+
+    it 'applies where conditions before sum with args' do
+      filtered = double('Relation')
+      model = double('Model')
+      allow(model).to receive(:where).with({ status: 'paid' }).and_return(filtered)
+      allow(filtered).to receive(:sum).with(:total).and_return(150)
+      allow(String).to receive(:constantize).and_return(model)
+
+      result = executor.execute_safe_query(
+        model: 'Order',
+        method: 'sum',
+        args: [:total],
+        where: { status: 'paid' }
+      )
+
+      expect(result[:success]).to be true
+      expect(result[:result]).to eq(150)
+    end
+  end
+
+  describe 'safe_query_scope application' do
+    let(:scoped_relation) { double('ActiveRecord::Relation', count: 42) }
+    let(:test_model) { Class.new { def self.count; end } }
+
+    before do
+      stub_const('SafeQueryScopeTestModel', test_model)
+    end
+
+    it 'invokes the proc with the model class and server_context' do
+      received_args = []
+      config.safe_query_scope = lambda do |model, server_context|
+        received_args << [model, server_context]
+        scoped_relation
+      end
+
+      ctx = { user_id: 99 }
+      result = executor.execute_safe_query(
+        model: 'SafeQueryScopeTestModel',
+        method: 'count',
+        server_context: ctx
+      )
+
+      expect(received_args).to eq([[test_model, ctx]])
+      expect(result[:success]).to be true
+      expect(result[:result]).to eq(42)
+    end
+
+    it 'passes an empty hash to the proc when server_context is nil' do
+      received_args = []
+      config.safe_query_scope = lambda do |model, server_context|
+        received_args << [model, server_context]
+        scoped_relation
+      end
+
+      result = executor.execute_safe_query(model: 'SafeQueryScopeTestModel', method: 'count')
+
+      expect(received_args).to eq([[test_model, {}]])
+      expect(result[:success]).to be true
+      expect(result[:result]).to eq(42)
+    end
+
+    it 'runs the method directly on the model class when no proc is configured' do
+      allow(test_model).to receive(:count).and_return(7)
+
+      result = executor.execute_safe_query(model: 'SafeQueryScopeTestModel', method: 'count')
+
+      expect(test_model).to have_received(:count)
+      expect(result[:success]).to be true
+      expect(result[:result]).to eq(7)
     end
   end
 

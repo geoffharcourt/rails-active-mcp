@@ -24,6 +24,19 @@ RailsActiveMcp.configure do |config|
   #   { pattern: /YourDangerousMethod/, description: "Your custom dangerous operation" }
   # ]
 
+  # Apply an additional scope to every SafeQueryTool query. The proc
+  # receives the model class and the MCP server_context (always a hash —
+  # `{}` if none was supplied), and must return a relation built from
+  # the model.
+  # config.safe_query_scope = ->(model_class, server_context) {
+  #   model_class.where(tenant_id: server_context[:tenant_id])
+  # }
+
+  # Replace the safety checker entirely with your own implementation.
+  # The class must respond to .new(config) and the resulting instance must
+  # respond to safe?(code), analyze(code), and read_only?(code).
+  # config.safety_checker = MyCustomSafetyChecker
+
   # Environment-specific adjustments
   case Rails.env
   when 'production'
