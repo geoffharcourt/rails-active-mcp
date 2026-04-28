@@ -415,4 +415,26 @@ RSpec.describe RailsActiveMcp::Configuration do
       expect(config.safe_query_scope).to eq(proc_value)
     end
   end
+
+  describe 'safety_checker' do
+    it 'defaults to RailsActiveMcp::SafetyChecker' do
+      expect(config.safety_checker).to eq(RailsActiveMcp::SafetyChecker)
+    end
+
+    it 'can be reassigned to a custom class' do
+      custom_class = Class.new
+      config.safety_checker = custom_class
+      expect(config.safety_checker).to eq(custom_class)
+    end
+
+    it 'remains valid after reassignment' do
+      config.safety_checker = Class.new
+      expect(config.valid?).to be true
+    end
+
+    it 'is invalid when safety_checker is nil' do
+      config.safety_checker = nil
+      expect(config.valid?).to be false
+    end
+  end
 end

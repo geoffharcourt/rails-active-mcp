@@ -32,6 +32,11 @@ RailsActiveMcp.configure do |config|
   #   model_class.where(tenant_id: server_context[:tenant_id])
   # }
 
+  # Replace the safety checker entirely with your own implementation.
+  # The class must respond to .new(config) and the resulting instance must
+  # respond to safe?(code), analyze(code), and read_only?(code).
+  # config.safety_checker = MyCustomSafetyChecker
+
   # Environment-specific adjustments
   case Rails.env
   when 'production'
